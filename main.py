@@ -31,8 +31,15 @@ RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "").rstrip("/")
 MUSIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "music")
 COOKIES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", stream=sys.stdout)
 logger = logging.getLogger("XiaoZhiCloudMCP")
+print(f"=== Starting XiaoZhi Cloud MCP Service (PORT={PORT}) ===", flush=True)
 
 # Check for YouTube cookies in environment variables
 if os.environ.get("YOUTUBE_COOKIES"):
@@ -63,14 +70,27 @@ class CloudHTTPHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=MUSIC_DIR, **kwargs)
 
+    def do_HEAD(self):
+        clean_path = self.path.split('?')[0].rstrip('/')
+        if clean_path in ["", "/health", "/healthz", "/ping"]:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            return
+        if self.path.startswith("/music/"):
+            self.path = self.path[6:]
+        super().do_HEAD()
+
     def do_GET(self):
-        if self.path == "/" or self.path == "/health":
+        clean_path = self.path.split('?')[0].rstrip('/')
+        if clean_path in ["", "/health", "/healthz", "/ping"]:
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             resp = json.dumps({
                 "status": "online",
                 "service": "XiaoZhi Cloud MCP",
+                "port": PORT,
                 "music_dir_files": len(os.listdir(MUSIC_DIR))
             })
             self.wfile.write(resp.encode("utf-8"))
@@ -96,7 +116,7 @@ def start_http_server():
     server = HTTPServer(("0.0.0.0", PORT), CloudHTTPHandler)
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
-    logger.info(f"Cloud HTTP Server running on port {PORT}. Public Base URL: {get_base_url()}")
+    logger.info(f"Cloud HTTP Server running on 0.0.0.0:{PORT}. Public Base URL: {get_base_url()}")
 
 # Keepalive Pinger to prevent Render Free Tier from idling
 def keepalive_worker():
