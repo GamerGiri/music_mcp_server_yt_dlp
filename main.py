@@ -185,6 +185,8 @@ def download_youtube_audio(query, temp_raw):
             cmd = [
                 "python", "-m", "yt_dlp",
                 "--no-playlist",
+                "-f", "ba/b",
+                "--socket-timeout", "15",
                 "-x", "--audio-format", "opus",
                 "--default-search", "ytsearch1",
                 "--cookies", COOKIES_FILE,
@@ -192,7 +194,7 @@ def download_youtube_audio(query, temp_raw):
                 f"ytsearch1:{q_try}"
             ]
             logger.info(f"Downloading YouTube track (with cookies): '{q_try}'...")
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=50)
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=75)
             if res.returncode == 0 and os.path.exists(temp_raw) and os.path.getsize(temp_raw) > 10000:
                 logger.info(f"Successfully downloaded '{q_try}' from YouTube with cookies!")
                 return True
@@ -213,6 +215,8 @@ def download_youtube_audio(query, temp_raw):
         cmd = [
             "python", "-m", "yt_dlp",
             "--no-playlist",
+            "-f", "ba/b",
+            "--socket-timeout", "15",
             "-x", "--audio-format", "opus",
             "--default-search", "ytsearch1",
             "--extractor-args", "youtube:player_client=android,web_creator,ios,web",
@@ -220,7 +224,7 @@ def download_youtube_audio(query, temp_raw):
             f"ytsearch1:{q_try}"
         ]
         logger.info(f"Downloading YouTube track (clean mode): '{q_try}'...")
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=50)
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=75)
         if res.returncode == 0 and os.path.exists(temp_raw) and os.path.getsize(temp_raw) > 10000:
             logger.info(f"Successfully downloaded '{q_try}' from YouTube in clean mode!")
             return True
