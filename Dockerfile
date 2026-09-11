@@ -16,8 +16,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# Copy application files
-COPY main.py .
+# Copy application files (including cookies.txt if present)
+COPY . .
 
 # Create music storage directory
 RUN mkdir -p /app/music

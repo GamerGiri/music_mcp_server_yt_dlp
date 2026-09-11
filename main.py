@@ -38,9 +38,17 @@ logger = logging.getLogger("XiaoZhiCloudMCP")
 # Check for YouTube cookies in environment variables
 if os.environ.get("YOUTUBE_COOKIES"):
     try:
+        raw_cookie = os.environ["YOUTUBE_COOKIES"].strip()
+        # Support base64 encoded cookies to prevent cloud UI newline destruction
+        if raw_cookie.startswith("base64:"):
+            clean_cookie = base64.b64decode(raw_cookie[7:]).decode("utf-8", errors="ignore")
+        else:
+            clean_cookie = raw_cookie.replace("\\n", "\n").replace("\\t", "\t").replace("\r\n", "\n")
+        
         with open(COOKIES_FILE, "w", encoding="utf-8") as f:
-            f.write(os.environ["YOUTUBE_COOKIES"])
-        logger.info(f"Loaded YouTube cookies from YOUTUBE_COOKIES environment variable into {COOKIES_FILE}")
+            f.write(clean_cookie)
+        valid_lines = [l for l in clean_cookie.splitlines() if l.strip() and not l.startswith("#")]
+        logger.info(f"Loaded YouTube cookies into {COOKIES_FILE}: {len(clean_cookie.splitlines())} total lines, {len(valid_lines)} active cookie entries.")
     except Exception as e:
         logger.warning(f"Failed to write YOUTUBE_COOKIES: {e}")
 
@@ -277,43 +285,41 @@ def play_music(song_name):
         }, ensure_ascii=False)
 
     display_title = query.title()
-    has_cookies = os.path.exists(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 10
+    temp_raw = os.path.join(MUSIC_DIR, f"temp_{slug}.opus")
 
-    # If user provided YouTube cookies, YouTube is the absolute #1 priority (100% Spotify/YT catalog)
-    if has_cookies:
-        logger.info(f"YouTube cookies active! Using YouTube as primary source for '{query}'...")
-        temp_raw = os.path.join(MUSIC_DIR, f"temp_{slug}.opus")
-        try:
-            if download_yt_dlp(query, temp_raw):
-                logger.info(f"Encoding '{temp_raw}' to mono 24kHz Opus...")
-                conv_cmd = [
-                    "ffmpeg", "-y",
-                    "-i", temp_raw,
-                    "-ac", "1",
-                    "-c:a", "libopus",
-                    "-ar", "24000",
-                    "-b:a", "64k",
-                    target_opus
-                ]
-                conv_res = subprocess.run(conv_cmd, capture_output=True, text=True, timeout=30)
-                if os.path.exists(temp_raw):
-                    try:
-                        os.remove(temp_raw)
-                    except Exception:
-                        pass
-                if conv_res.returncode == 0 and os.path.exists(target_opus) and os.path.getsize(target_opus) > 20000:
-                    logger.info(f"YouTube track successfully created: '{target_opus}' ({os.path.getsize(target_opus)} bytes)")
-                    audio_url = f"{base_url}/music/{urllib.parse.quote(f'{slug}.opus')}"
-                    return json.dumps({
-                        "status": "ready",
-                        "title": display_title,
-                        "audio_url": audio_url,
-                        "instructions": f"The song '{display_title}' is ready. Call tool `self.audio_speaker.play_url` with url='{audio_url}' and title='{display_title}' immediately to play it on the device speaker."
-                    }, ensure_ascii=False)
-        except Exception as e:
-            logger.warning(f"Authenticated YouTube attempt error: {e}")
+    # 1. Primary Engine: yt-dlp (YouTube if cookies present, or SoundCloud with full-length filter)
+    try:
+        success = download_yt_dlp(query, temp_raw)
+        if success and os.path.exists(temp_raw) and os.path.getsize(temp_raw) > 10000:
+            logger.info(f"Encoding '{temp_raw}' to mono 24kHz Opus...")
+            conv_cmd = [
+                "ffmpeg", "-y",
+                "-i", temp_raw,
+                "-ac", "1",
+                "-c:a", "libopus",
+                "-ar", "24000",
+                "-b:a", "64k",
+                target_opus
+            ]
+            conv_res = subprocess.run(conv_cmd, capture_output=True, text=True, timeout=35)
+            if os.path.exists(temp_raw):
+                try:
+                    os.remove(temp_raw)
+                except Exception:
+                    pass
+            if conv_res.returncode == 0 and os.path.exists(target_opus) and os.path.getsize(target_opus) > 20000:
+                logger.info(f"Track successfully created via yt-dlp: '{target_opus}' ({os.path.getsize(target_opus)} bytes)")
+                audio_url = f"{base_url}/music/{urllib.parse.quote(f'{slug}.opus')}"
+                return json.dumps({
+                    "status": "ready",
+                    "title": display_title,
+                    "audio_url": audio_url,
+                    "instructions": f"The song '{display_title}' is ready. Call tool `self.audio_speaker.play_url` with url='{audio_url}' and title='{display_title}' immediately to play it on the device speaker."
+                }, ensure_ascii=False)
+    except Exception as e:
+        logger.warning(f"Primary yt-dlp engine attempt error: {e}")
 
-    # 2. Stage 1: Try high-speed Global Studio Music Catalog (JioSaavn direct CDN)
+    # 2. Secondary Engine: Global Studio Music Catalog (Saavn direct CDN)
     title, stream_url = fetch_music_saavn(query)
     if stream_url:
         logger.info(f"Encoding studio stream for '{title}' directly to mono 24kHz Opus...")
@@ -328,7 +334,7 @@ def play_music(song_name):
         ]
         conv_res = subprocess.run(conv_cmd, capture_output=True, text=True, timeout=45)
         if conv_res.returncode == 0 and os.path.exists(target_opus) and os.path.getsize(target_opus) > 20000:
-            logger.info(f"Track successfully created: '{target_opus}' ({os.path.getsize(target_opus)} bytes)")
+            logger.info(f"Track successfully created via Saavn: '{target_opus}' ({os.path.getsize(target_opus)} bytes)")
             audio_url = f"{base_url}/music/{urllib.parse.quote(f'{slug}.opus')}"
             return json.dumps({
                 "status": "ready",
@@ -336,60 +342,11 @@ def play_music(song_name):
                 "audio_url": audio_url,
                 "instructions": f"The song '{title}' is ready. Call tool `self.audio_speaker.play_url` with url='{audio_url}' and title='{title}' immediately to play it on the device speaker."
             }, ensure_ascii=False)
-        else:
-            logger.warning(f"Direct stream conversion failed: {conv_res.stderr[:200] if conv_res.stderr else 'unknown'}, falling back to yt-dlp...")
 
-    # 3. Stage 2: Fallback to yt-dlp (YouTube / SoundCloud)
-    temp_raw = os.path.join(MUSIC_DIR, f"temp_{slug}.opus")
-    try:
-        success = download_yt_dlp(query, temp_raw)
-        if not success:
-            return json.dumps({
-                "status": "error",
-                "message": f"Could not find or download music for '{query}' across music catalogs."
-            }, ensure_ascii=False)
-
-        # Convert downloaded audio to mono 24kHz Opus for ESP32
-        logger.info(f"Encoding downloaded audio '{temp_raw}' to mono 24kHz Opus...")
-        conv_cmd = [
-            "ffmpeg", "-y",
-            "-i", temp_raw,
-            "-ac", "1",
-            "-c:a", "libopus",
-            "-ar", "24000",
-            "-b:a", "64k",
-            target_opus
-        ]
-        conv_res = subprocess.run(conv_cmd, capture_output=True, text=True, timeout=30)
-        
-        if os.path.exists(temp_raw):
-            try:
-                os.remove(temp_raw)
-            except Exception:
-                pass
-
-        if conv_res.returncode != 0 or not os.path.exists(target_opus) or os.path.getsize(target_opus) < 20000:
-            logger.error(f"ffmpeg conversion failed: {conv_res.stderr}")
-            return json.dumps({
-                "status": "error",
-                "message": f"Failed to encode audio for '{query}'."
-            }, ensure_ascii=False)
-
-        logger.info(f"Track ready: '{target_opus}' ({os.path.getsize(target_opus)} bytes)!")
-        audio_url = f"{base_url}/music/{urllib.parse.quote(f'{slug}.opus')}"
-        return json.dumps({
-            "status": "ready",
-            "title": display_title,
-            "audio_url": audio_url,
-            "instructions": f"The song '{display_title}' has been downloaded and is ready to stream. Call tool `self.audio_speaker.play_url` with url='{audio_url}' and title='{display_title}' immediately to start playback."
-        }, ensure_ascii=False)
-
-    except subprocess.TimeoutExpired:
-        logger.error(f"Timed out fetching music for '{query}'")
-        return json.dumps({"status": "error", "message": "Download timed out. Please try again."})
-    except Exception as e:
-        logger.error(f"Exception during play_music: {e}")
-        return json.dumps({"status": "error", "message": str(e)})
+    return json.dumps({
+        "status": "error",
+        "message": f"Could not find or download music for '{query}' across music catalogs."
+    }, ensure_ascii=False)
 
 TOOLS_DEFINITIONS = [
     {
