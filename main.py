@@ -20,7 +20,6 @@ import sys
 import time
 import urllib.request
 import base64
-from Crypto.Cipher import DES
 
 # Configuration from Environment Variables
 MCP_WS_URL = os.environ.get(
@@ -149,122 +148,42 @@ def sanitize_filename(name):
     clean = re.sub(r'[\\/*?:"<>| ]+', '_', name).strip('_').lower()
     return clean[:60] if clean else "track"
 
-def fetch_music_saavn(query):
+def download_youtube_audio(query, temp_raw):
     """
-    Direct high-speed studio music search and stream extractor.
-    Accesses global Warner, Sony, Universal studio tracks via direct CDN.
-    Completely bypasses YouTube datacenter bot blocks and 403 Forbidden errors.
+    Direct YouTube audio download using yt-dlp with VisionOS & MediaConnect clients.
+    Bypasses datacenter 403 Forbidden blocks without requiring external services.
     """
-    try:
-        clean_q = re.sub(r'^(play|listen to|song|music)\s+', '', query, flags=re.IGNORECASE).strip()
-        
-        # Check if user specified song and artist (e.g. "Let It Happen by Tame Impala" or "Queen - Bohemian Rhapsody")
-        artist_filter = None
-        song_query = clean_q
-        if ' by ' in clean_q.lower():
-            parts = re.split(r'\s+by\s+', clean_q, flags=re.IGNORECASE)
-            song_query, artist_filter = parts[0].strip(), parts[1].strip()
-        elif ' - ' in clean_q:
-            parts = clean_q.split(' - ')
-            song_query, artist_filter = parts[0].strip(), parts[1].strip()
-
-        # Try song title query first, then full query
-        queries_to_try = [song_query, clean_q] if song_query != clean_q else [clean_q]
-
-        for q_try in queries_to_try:
-            q_enc = urllib.parse.quote(q_try)
-            url = f"https://www.jiosaavn.com/api.php?__call=search.getResults&_format=json&n=10&p=1&_marker=0&ctx=web6dot0&q={q_enc}"
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
-            with urllib.request.urlopen(req, timeout=10) as r:
-                raw_text = r.read().decode('utf-8', errors='ignore')
-                data = json.loads(raw_text)
-                results = data.get("results", [])
-
-                # If artist was mentioned, prioritize item matching the artist
-                if artist_filter:
-                    for res in results:
-                        primary = (res.get("primary_artists") or "") + " " + (res.get("singers") or "")
-                        if any(w.lower() in primary.lower() for w in artist_filter.split() if len(w) > 2):
-                            enc = res.get("encrypted_media_url")
-                            if enc:
-                                cipher = DES.new(b"38346591", DES.MODE_ECB)
-                                dec = cipher.decrypt(base64.b64decode(enc))
-                                pad = dec[-1]
-                                stream_url = dec[:-pad].decode("utf-8") if pad < 16 else dec.decode("utf-8", errors="ignore").rstrip("\x00")
-                                stream_url = stream_url.replace("_96.mp4", "_160.mp4")
-                                title = html.unescape(res.get("song") or song_query)
-                                artist = html.unescape(res.get("primary_artists") or artist_filter)
-                                full_title = f"{title} - {artist}" if artist else title
-                                logger.info(f"Resolved studio track via Saavn (artist match): '{full_title}'")
-                                return full_title, stream_url
-                    # Artist requested but none matched in this query
-                    continue
-
-                # Fallback to top result only if no specific artist was requested
-                for res in results:
-                    enc = res.get("encrypted_media_url")
-                    if enc:
-                        cipher = DES.new(b"38346591", DES.MODE_ECB)
-                        dec = cipher.decrypt(base64.b64decode(enc))
-                        pad = dec[-1]
-                        stream_url = dec[:-pad].decode("utf-8") if pad < 16 else dec.decode("utf-8", errors="ignore").rstrip("\x00")
-                        stream_url = stream_url.replace("_96.mp4", "_160.mp4")
-                        title = html.unescape(res.get("song") or clean_q)
-                        artist = html.unescape(res.get("primary_artists") or "")
-                        full_title = f"{title} - {artist}" if artist else title
-                        logger.info(f"Resolved studio track via Saavn (top match): '{full_title}'")
-                        return full_title, stream_url
-    except Exception as e:
-        logger.warning(f"Saavn catalog search error for '{query}': {e}")
-    return None, None
-
-def download_yt_dlp(query, temp_raw):
-    """
-    Music search and downloader using yt-dlp.
-    Supports YouTube with cookies, and SoundCloud with duration filtering (>60s).
-    """
-    base_cmd = ["python", "-m", "yt_dlp", "--no-playlist", "-x", "--audio-format", "opus"]
     has_cookies = os.path.exists(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 10
     
-    # Pass cookies if available
-    if has_cookies:
-        base_cmd.extend(["--cookies", COOKIES_FILE])
-
-    # Pass JS runtime if node is installed
-    if os.path.exists("/usr/bin/node") or os.path.exists("/usr/local/bin/node"):
-        base_cmd.extend(["--js-runtimes", "node"])
-
-    # Attempt 1: YouTube Music search
-    yt_query = f"{query} audio" if "audio" not in query.lower() else query
-    dl_cmd_yt = base_cmd + [
-        "--default-search", "ytsearch1",
-        "-o", temp_raw,
-        f"ytsearch1:{yt_query}"
-    ]
-    logger.info(f"Attempting yt-dlp YouTube search for '{yt_query}' (cookies={'yes' if has_cookies else 'no'})...")
-    res = subprocess.run(dl_cmd_yt, capture_output=True, text=True, timeout=45)
-    if res.returncode == 0 and os.path.exists(temp_raw) and os.path.getsize(temp_raw) > 10000:
-        return True
-
-    logger.warning(f"YouTube attempt failed ({res.stderr[:200] if res.stderr else 'unknown error'}). Trying SoundCloud with full-length filter...")
-
-    # Attempt 2: SoundCloud search with duration > 60s filter to skip 30s previews
-    dl_cmd_sc = base_cmd + [
-        "--default-search", "scsearch5",
-        "--match-filter", "duration > 60",
-        "-o", temp_raw,
-        f"scsearch5:{query}"
-    ]
-    res_sc = subprocess.run(dl_cmd_sc, capture_output=True, text=True, timeout=45)
-    if res_sc.returncode == 0 and os.path.exists(temp_raw) and os.path.getsize(temp_raw) > 10000:
-        return True
-
-    logger.error(f"SoundCloud attempt also failed: {res_sc.stderr[:200] if res_sc.stderr else 'unknown'}")
+    # Try with 'official audio' suffix first to target master studio uploads
+    queries = [f"{query} official audio", f"{query} audio", query]
+    
+    for q_try in queries:
+        cmd = [
+            "python", "-m", "yt_dlp",
+            "--no-playlist",
+            "-x", "--audio-format", "opus",
+            "--default-search", "ytsearch1",
+            "--extractor-args", "youtube:player_client=visionos,mediaconnect,web",
+            "-o", temp_raw,
+            f"ytsearch1:{q_try}"
+        ]
+        if has_cookies:
+            cmd.extend(["--cookies", COOKIES_FILE])
+            
+        logger.info(f"Downloading YouTube track: '{q_try}' (cookies={'yes' if has_cookies else 'no'})...")
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=50)
+        if res.returncode == 0 and os.path.exists(temp_raw) and os.path.getsize(temp_raw) > 10000:
+            logger.info(f"Successfully downloaded '{q_try}' from YouTube!")
+            return True
+        else:
+            logger.warning(f"Attempt failed for '{q_try}': {res.stderr[:200] if res.stderr else 'unknown'}")
+            
     return False
 
-# Cloud Music Fetcher & Converter
+# Cloud YouTube Music Fetcher & Converter
 def play_music(song_name):
-    logger.info(f"Cloud music requested for: '{song_name}'")
+    logger.info(f"Cloud YouTube music requested for: '{song_name}'")
     query = re.sub(r'^(play|listen to|song|music)\s+', '', song_name, flags=re.IGNORECASE).strip()
     if not query:
         query = song_name.strip()
@@ -287,66 +206,55 @@ def play_music(song_name):
     display_title = query.title()
     temp_raw = os.path.join(MUSIC_DIR, f"temp_{slug}.opus")
 
-    # 1. Primary Engine: yt-dlp (YouTube if cookies present, or SoundCloud with full-length filter)
     try:
-        success = download_yt_dlp(query, temp_raw)
-        if success and os.path.exists(temp_raw) and os.path.getsize(temp_raw) > 10000:
-            logger.info(f"Encoding '{temp_raw}' to mono 24kHz Opus...")
-            conv_cmd = [
-                "ffmpeg", "-y",
-                "-i", temp_raw,
-                "-ac", "1",
-                "-c:a", "libopus",
-                "-ar", "24000",
-                "-b:a", "64k",
-                target_opus
-            ]
-            conv_res = subprocess.run(conv_cmd, capture_output=True, text=True, timeout=35)
-            if os.path.exists(temp_raw):
-                try:
-                    os.remove(temp_raw)
-                except Exception:
-                    pass
-            if conv_res.returncode == 0 and os.path.exists(target_opus) and os.path.getsize(target_opus) > 20000:
-                logger.info(f"Track successfully created via yt-dlp: '{target_opus}' ({os.path.getsize(target_opus)} bytes)")
-                audio_url = f"{base_url}/music/{urllib.parse.quote(f'{slug}.opus')}"
-                return json.dumps({
-                    "status": "ready",
-                    "title": display_title,
-                    "audio_url": audio_url,
-                    "instructions": f"The song '{display_title}' is ready. Call tool `self.audio_speaker.play_url` with url='{audio_url}' and title='{display_title}' immediately to play it on the device speaker."
-                }, ensure_ascii=False)
-    except Exception as e:
-        logger.warning(f"Primary yt-dlp engine attempt error: {e}")
+        success = download_youtube_audio(query, temp_raw)
+        if not success or not os.path.exists(temp_raw) or os.path.getsize(temp_raw) < 10000:
+            return json.dumps({
+                "status": "error",
+                "message": f"Could not find or download '{query}' from YouTube."
+            }, ensure_ascii=False)
 
-    # 2. Secondary Engine: Global Studio Music Catalog (Saavn direct CDN)
-    title, stream_url = fetch_music_saavn(query)
-    if stream_url:
-        logger.info(f"Encoding studio stream for '{title}' directly to mono 24kHz Opus...")
+        # Convert downloaded YouTube audio to mono 24kHz Opus for ESP32
+        logger.info(f"Encoding YouTube audio '{temp_raw}' to mono 24kHz Opus...")
         conv_cmd = [
             "ffmpeg", "-y",
-            "-i", stream_url,
+            "-i", temp_raw,
             "-ac", "1",
             "-c:a", "libopus",
             "-ar", "24000",
             "-b:a", "64k",
             target_opus
         ]
-        conv_res = subprocess.run(conv_cmd, capture_output=True, text=True, timeout=45)
-        if conv_res.returncode == 0 and os.path.exists(target_opus) and os.path.getsize(target_opus) > 20000:
-            logger.info(f"Track successfully created via Saavn: '{target_opus}' ({os.path.getsize(target_opus)} bytes)")
-            audio_url = f"{base_url}/music/{urllib.parse.quote(f'{slug}.opus')}"
+        conv_res = subprocess.run(conv_cmd, capture_output=True, text=True, timeout=35)
+        
+        if os.path.exists(temp_raw):
+            try:
+                os.remove(temp_raw)
+            except Exception:
+                pass
+
+        if conv_res.returncode != 0 or not os.path.exists(target_opus) or os.path.getsize(target_opus) < 20000:
+            logger.error(f"ffmpeg conversion failed: {conv_res.stderr}")
             return json.dumps({
-                "status": "ready",
-                "title": title,
-                "audio_url": audio_url,
-                "instructions": f"The song '{title}' is ready. Call tool `self.audio_speaker.play_url` with url='{audio_url}' and title='{title}' immediately to play it on the device speaker."
+                "status": "error",
+                "message": f"Failed to encode YouTube audio for '{query}'."
             }, ensure_ascii=False)
 
-    return json.dumps({
-        "status": "error",
-        "message": f"Could not find or download music for '{query}' across music catalogs."
-    }, ensure_ascii=False)
+        logger.info(f"YouTube track ready: '{target_opus}' ({os.path.getsize(target_opus)} bytes)!")
+        audio_url = f"{base_url}/music/{urllib.parse.quote(f'{slug}.opus')}"
+        return json.dumps({
+            "status": "ready",
+            "title": display_title,
+            "audio_url": audio_url,
+            "instructions": f"The song '{display_title}' has been downloaded from YouTube and is ready to stream. Call tool `self.audio_speaker.play_url` with url='{audio_url}' and title='{display_title}' immediately to start playback."
+        }, ensure_ascii=False)
+
+    except subprocess.TimeoutExpired:
+        logger.error(f"Timed out fetching music for '{query}' from YouTube")
+        return json.dumps({"status": "error", "message": "YouTube download timed out. Please try again."})
+    except Exception as e:
+        logger.error(f"Exception during play_music: {e}")
+        return json.dumps({"status": "error", "message": str(e)})
 
 TOOLS_DEFINITIONS = [
     {
