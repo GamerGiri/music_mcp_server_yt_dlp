@@ -1,23 +1,27 @@
 FROM python:3.11-slim
 
-# Install system dependencies (ffmpeg for opus conversion, curl for web search)
+# Install system dependencies:
+# - ffmpeg: audio encoding to mono 24kHz Opus
+# - curl: DuckDuckGo web search
+# - nodejs: JavaScript challenge solver for yt-dlp (bypasses YouTube bot/signature checks)
+# - ca-certificates: SSL validation
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg curl ca-certificates && \
+    apt-get install -y --no-install-recommends ffmpeg curl ca-certificates nodejs && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Install Python dependencies
+# Install latest dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
 # Copy application files
 COPY main.py .
 
-# Create music directory
+# Create music storage directory
 RUN mkdir -p /app/music
 
-# Expose Render HTTP port
 EXPOSE 10000
 
 ENV PORT=10000

@@ -160,10 +160,24 @@ def play_music(song_name):
             "--default-search", "ytsearch1",
             "--no-playlist",
             "-x", "--audio-format", "opus",
+            "--extractor-args", "youtube:player_client=android,web",
             "-o", temp_raw,
             f"ytsearch1:{query}"
         ]
         res = subprocess.run(dl_cmd, capture_output=True, text=True, timeout=40)
+        if res.returncode != 0:
+            logger.warning(f"Primary yt-dlp attempt failed ({res.stderr[:200] if res.stderr else 'no err'}), trying fallback client...")
+            dl_cmd_fallback = [
+                "python", "-m", "yt_dlp",
+                "--default-search", "ytsearch1",
+                "--no-playlist",
+                "-x", "--audio-format", "opus",
+                "--extractor-args", "youtube:player_client=ios,mweb",
+                "-o", temp_raw,
+                f"ytsearch1:{query}"
+            ]
+            res = subprocess.run(dl_cmd_fallback, capture_output=True, text=True, timeout=40)
+
         if res.returncode != 0:
             logger.error(f"yt-dlp error: {res.stderr}")
             return json.dumps({
