@@ -189,8 +189,10 @@ def fetch_music_saavn(query):
                                 full_title = f"{title} - {artist}" if artist else title
                                 logger.info(f"Resolved studio track via Saavn (artist match): '{full_title}'")
                                 return full_title, stream_url
+                    # Artist requested but none matched in this query
+                    continue
 
-                # Fallback to top result
+                # Fallback to top result only if no specific artist was requested
                 for res in results:
                     enc = res.get("encrypted_media_url")
                     if enc:
@@ -210,40 +212,42 @@ def fetch_music_saavn(query):
 
 def download_yt_dlp(query, temp_raw):
     """
-    Fallback music search and downloader using yt-dlp.
-    Supports YouTube with cookies / TV client, and SoundCloud.
+    Music search and downloader using yt-dlp.
+    Supports YouTube with cookies, and SoundCloud with duration filtering (>60s).
     """
     base_cmd = ["python", "-m", "yt_dlp", "--no-playlist", "-x", "--audio-format", "opus"]
+    has_cookies = os.path.exists(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 10
     
     # Pass cookies if available
-    if os.path.exists(COOKIES_FILE):
+    if has_cookies:
         base_cmd.extend(["--cookies", COOKIES_FILE])
 
     # Pass JS runtime if node is installed
     if os.path.exists("/usr/bin/node") or os.path.exists("/usr/local/bin/node"):
         base_cmd.extend(["--js-runtimes", "node"])
 
-    # Attempt 1: YouTube with TV/mweb client
+    # Attempt 1: YouTube Music search
+    yt_query = f"{query} audio" if "audio" not in query.lower() else query
     dl_cmd_yt = base_cmd + [
         "--default-search", "ytsearch1",
-        "--extractor-args", "youtube:player_client=tv,mweb",
         "-o", temp_raw,
-        f"ytsearch1:{query}"
+        f"ytsearch1:{yt_query}"
     ]
-    logger.info(f"Attempting yt-dlp YouTube search for '{query}'...")
-    res = subprocess.run(dl_cmd_yt, capture_output=True, text=True, timeout=40)
+    logger.info(f"Attempting yt-dlp YouTube search for '{yt_query}' (cookies={'yes' if has_cookies else 'no'})...")
+    res = subprocess.run(dl_cmd_yt, capture_output=True, text=True, timeout=45)
     if res.returncode == 0 and os.path.exists(temp_raw) and os.path.getsize(temp_raw) > 10000:
         return True
 
-    logger.warning(f"YouTube attempt failed ({res.stderr[:200] if res.stderr else 'unknown error'}). Trying SoundCloud fallback...")
+    logger.warning(f"YouTube attempt failed ({res.stderr[:200] if res.stderr else 'unknown error'}). Trying SoundCloud with full-length filter...")
 
-    # Attempt 2: SoundCloud search (unblocked on datacenter IPs)
+    # Attempt 2: SoundCloud search with duration > 60s filter to skip 30s previews
     dl_cmd_sc = base_cmd + [
-        "--default-search", "scsearch1",
+        "--default-search", "scsearch5",
+        "--match-filter", "duration > 60",
         "-o", temp_raw,
-        f"scsearch1:{query}"
+        f"scsearch5:{query}"
     ]
-    res_sc = subprocess.run(dl_cmd_sc, capture_output=True, text=True, timeout=40)
+    res_sc = subprocess.run(dl_cmd_sc, capture_output=True, text=True, timeout=45)
     if res_sc.returncode == 0 and os.path.exists(temp_raw) and os.path.getsize(temp_raw) > 10000:
         return True
 
@@ -273,6 +277,41 @@ def play_music(song_name):
         }, ensure_ascii=False)
 
     display_title = query.title()
+    has_cookies = os.path.exists(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 10
+
+    # If user provided YouTube cookies, YouTube is the absolute #1 priority (100% Spotify/YT catalog)
+    if has_cookies:
+        logger.info(f"YouTube cookies active! Using YouTube as primary source for '{query}'...")
+        temp_raw = os.path.join(MUSIC_DIR, f"temp_{slug}.opus")
+        try:
+            if download_yt_dlp(query, temp_raw):
+                logger.info(f"Encoding '{temp_raw}' to mono 24kHz Opus...")
+                conv_cmd = [
+                    "ffmpeg", "-y",
+                    "-i", temp_raw,
+                    "-ac", "1",
+                    "-c:a", "libopus",
+                    "-ar", "24000",
+                    "-b:a", "64k",
+                    target_opus
+                ]
+                conv_res = subprocess.run(conv_cmd, capture_output=True, text=True, timeout=30)
+                if os.path.exists(temp_raw):
+                    try:
+                        os.remove(temp_raw)
+                    except Exception:
+                        pass
+                if conv_res.returncode == 0 and os.path.exists(target_opus) and os.path.getsize(target_opus) > 20000:
+                    logger.info(f"YouTube track successfully created: '{target_opus}' ({os.path.getsize(target_opus)} bytes)")
+                    audio_url = f"{base_url}/music/{urllib.parse.quote(f'{slug}.opus')}"
+                    return json.dumps({
+                        "status": "ready",
+                        "title": display_title,
+                        "audio_url": audio_url,
+                        "instructions": f"The song '{display_title}' is ready. Call tool `self.audio_speaker.play_url` with url='{audio_url}' and title='{display_title}' immediately to play it on the device speaker."
+                    }, ensure_ascii=False)
+        except Exception as e:
+            logger.warning(f"Authenticated YouTube attempt error: {e}")
 
     # 2. Stage 1: Try high-speed Global Studio Music Catalog (JioSaavn direct CDN)
     title, stream_url = fetch_music_saavn(query)
