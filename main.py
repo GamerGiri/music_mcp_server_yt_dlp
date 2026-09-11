@@ -170,15 +170,45 @@ def sanitize_filename(name):
 
 def download_youtube_audio(query, temp_raw):
     """
-    Direct YouTube audio download using yt-dlp with android, web_creator, ios, and web clients.
-    Prioritizes clean cookie-free extraction so expired cookies never block playback.
+    Direct YouTube audio download using yt-dlp.
+    When cookies are present, uses authenticated extraction with Deno challenge solver.
+    Falls back to clean multi-client extraction if cookies are absent.
     """
     has_cookies = os.path.exists(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 10
     
     # Try with 'official audio' suffix first to target master studio uploads
     queries = [f"{query} official audio", f"{query} audio", query]
     
-    # Pass 1: Clean extraction without cookies (bypasses expired cookie errors)
+    # Pass 1: If cookies exist, use authenticated extraction first
+    if has_cookies:
+        for q_try in queries:
+            cmd = [
+                "python", "-m", "yt_dlp",
+                "--no-playlist",
+                "-x", "--audio-format", "opus",
+                "--default-search", "ytsearch1",
+                "--cookies", COOKIES_FILE,
+                "-o", temp_raw,
+                f"ytsearch1:{q_try}"
+            ]
+            logger.info(f"Downloading YouTube track (with cookies): '{q_try}'...")
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=50)
+            if res.returncode == 0 and os.path.exists(temp_raw) and os.path.getsize(temp_raw) > 10000:
+                logger.info(f"Successfully downloaded '{q_try}' from YouTube with cookies!")
+                return True
+            else:
+                err_snippet = res.stderr[:250] if res.stderr else "unknown error"
+                logger.warning(f"Cookie attempt failed for '{q_try}': {err_snippet}")
+                if "cookies are no longer valid" in (res.stderr or ""):
+                    logger.warning("Detected expired cookies in environment! Discarding cookies file.")
+                    try:
+                        os.remove(COOKIES_FILE)
+                    except Exception:
+                        pass
+                    has_cookies = False
+                    break
+
+    # Pass 2: Clean extraction without cookies (fallback)
     for q_try in queries:
         cmd = [
             "python", "-m", "yt_dlp",
@@ -189,7 +219,7 @@ def download_youtube_audio(query, temp_raw):
             "-o", temp_raw,
             f"ytsearch1:{q_try}"
         ]
-        logger.info(f"Downloading YouTube track: '{q_try}' (clean mode)...")
+        logger.info(f"Downloading YouTube track (clean mode): '{q_try}'...")
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=50)
         if res.returncode == 0 and os.path.exists(temp_raw) and os.path.getsize(temp_raw) > 10000:
             logger.info(f"Successfully downloaded '{q_try}' from YouTube in clean mode!")
@@ -198,33 +228,6 @@ def download_youtube_audio(query, temp_raw):
             err_snippet = res.stderr[:250] if res.stderr else "unknown error"
             logger.warning(f"Clean attempt failed for '{q_try}': {err_snippet}")
 
-    # Pass 2: Fallback with cookies if available and clean mode did not succeed
-    if has_cookies:
-        for q_try in queries:
-            cmd = [
-                "python", "-m", "yt_dlp",
-                "--no-playlist",
-                "-x", "--audio-format", "opus",
-                "--default-search", "ytsearch1",
-                "--extractor-args", "youtube:player_client=android,web_creator,ios,web",
-                "--cookies", COOKIES_FILE,
-                "-o", temp_raw,
-                f"ytsearch1:{q_try}"
-            ]
-            logger.info(f"Downloading YouTube track: '{q_try}' (with cookies)...")
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=50)
-            if res.returncode == 0 and os.path.exists(temp_raw) and os.path.getsize(temp_raw) > 10000:
-                logger.info(f"Successfully downloaded '{q_try}' with cookies!")
-                return True
-            else:
-                if "cookies are no longer valid" in (res.stderr or ""):
-                    logger.warning("Detected expired cookies in environment! Discarding cookies file.")
-                    try:
-                        os.remove(COOKIES_FILE)
-                    except Exception:
-                        pass
-                    break
-            
     return False
 
 # Cloud YouTube Music Fetcher & Converter
