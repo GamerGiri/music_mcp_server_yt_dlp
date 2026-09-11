@@ -168,69 +168,81 @@ def sanitize_filename(name):
     clean = re.sub(r'[\\/*?:"<>| ]+', '_', name).strip('_').lower()
     return clean[:60] if clean else "track"
 
+def get_youtube_video_url(query):
+    # 1. Direct YouTube HTML search (super fast, ~0.4s, needs no cookies)
+    try:
+        url = f"https://www.youtube.com/results?search_query={urllib.parse.quote(query)}"
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9"
+        })
+        with urllib.request.urlopen(req, timeout=6) as r:
+            html_text = r.read().decode("utf-8", errors="ignore")
+        vids = re.findall(r'/watch\?v=([a-zA-Z0-9_-]{11})', html_text)
+        if vids:
+            for v in vids:
+                return f"https://www.youtube.com/watch?v={v}"
+    except Exception as e:
+        logger.warning(f"HTML YouTube search failed for '{query}': {e}")
+
+    # 2. Fallback: yt-dlp search without cookies
+    try:
+        cmd = ["python", "-m", "yt_dlp", "--default-search", "ytsearch1", "--print", "id", f"ytsearch1:{query}"]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=12)
+        for line in res.stdout.splitlines():
+            vid = line.strip()
+            if len(vid) == 11 and re.match(r'^[a-zA-Z0-9_-]{11}$', vid):
+                return f"https://www.youtube.com/watch?v={vid}"
+    except Exception as e:
+        logger.warning(f"yt-dlp search fallback failed: {e}")
+
+    return None
+
 def download_youtube_audio(query, temp_raw):
     """
     Direct YouTube audio download using yt-dlp.
-    When cookies are present, uses authenticated extraction with Deno challenge solver.
-    Falls back to clean multi-client extraction if cookies are absent.
+    1. Resolves video URL cleanly without cookies to avoid HTTP 400 Bad Request on search API.
+    2. Downloads format 251/140 audio directly with cookies to bypass 403 Forbidden.
     """
     has_cookies = os.path.exists(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 10
     
-    # Try with 'official audio' suffix first to target master studio uploads
+    # Target master studio uploads
     queries = [f"{query} official audio", f"{query} audio", query]
     
-    # Pass 1: If cookies exist, use authenticated extraction first
-    if has_cookies:
-        for q_try in queries:
-            cmd = [
-                "python", "-m", "yt_dlp",
-                "--no-playlist",
-                "-f", "ba/b",
-                "--socket-timeout", "15",
-                "-x", "--audio-format", "opus",
-                "--default-search", "ytsearch1",
-                "--cookies", COOKIES_FILE,
-                "-o", temp_raw,
-                f"ytsearch1:{q_try}"
-            ]
-            logger.info(f"Downloading YouTube track (with cookies): '{q_try}'...")
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=75)
-            if res.returncode == 0 and os.path.exists(temp_raw) and os.path.getsize(temp_raw) > 10000:
-                logger.info(f"Successfully downloaded '{q_try}' from YouTube with cookies!")
-                return True
-            else:
-                err_snippet = res.stderr[:250] if res.stderr else "unknown error"
-                logger.warning(f"Cookie attempt failed for '{q_try}': {err_snippet}")
-                if "cookies are no longer valid" in (res.stderr or ""):
-                    logger.warning("Detected expired cookies in environment! Discarding cookies file.")
-                    try:
-                        os.remove(COOKIES_FILE)
-                    except Exception:
-                        pass
-                    has_cookies = False
-                    break
-
-    # Pass 2: Clean extraction without cookies (fallback)
+    video_url = None
     for q_try in queries:
+        video_url = get_youtube_video_url(q_try)
+        if video_url:
+            logger.info(f"Resolved video URL for '{q_try}': {video_url}")
+            break
+            
+    if not video_url:
+        video_url = f"ytsearch1:{query}"
+
+    # Download attempts: with cookies first (if present), then clean fallback
+    attempts = []
+    if has_cookies:
+        attempts.append(("with cookies", ["--cookies", COOKIES_FILE]))
+    attempts.append(("clean mode", ["--extractor-args", "youtube:player_client=android,web_creator,ios,web"]))
+
+    for mode_name, extra_args in attempts:
         cmd = [
             "python", "-m", "yt_dlp",
             "--no-playlist",
             "-f", "ba/b",
             "--socket-timeout", "15",
             "-x", "--audio-format", "opus",
-            "--default-search", "ytsearch1",
-            "--extractor-args", "youtube:player_client=android,web_creator,ios,web",
-            "-o", temp_raw,
-            f"ytsearch1:{q_try}"
-        ]
-        logger.info(f"Downloading YouTube track (clean mode): '{q_try}'...")
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=75)
+            "-o", temp_raw
+        ] + extra_args + [video_url]
+
+        logger.info(f"Downloading YouTube track ({mode_name}) from {video_url}...")
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         if res.returncode == 0 and os.path.exists(temp_raw) and os.path.getsize(temp_raw) > 10000:
-            logger.info(f"Successfully downloaded '{q_try}' from YouTube in clean mode!")
+            logger.info(f"Successfully downloaded track from YouTube ({mode_name})!")
             return True
         else:
             err_snippet = res.stderr[:250] if res.stderr else "unknown error"
-            logger.warning(f"Clean attempt failed for '{q_try}': {err_snippet}")
+            logger.warning(f"Attempt failed ({mode_name}): {err_snippet}")
 
     return False
 
