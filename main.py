@@ -170,34 +170,60 @@ def sanitize_filename(name):
 
 def download_youtube_audio(query, temp_raw):
     """
-    Direct YouTube audio download using yt-dlp with VisionOS & MediaConnect clients.
-    Bypasses datacenter 403 Forbidden blocks without requiring external services.
+    Direct YouTube audio download using yt-dlp with android, web_creator, ios, and web clients.
+    Prioritizes clean cookie-free extraction so expired cookies never block playback.
     """
     has_cookies = os.path.exists(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 10
     
     # Try with 'official audio' suffix first to target master studio uploads
     queries = [f"{query} official audio", f"{query} audio", query]
     
+    # Pass 1: Clean extraction without cookies (bypasses expired cookie errors)
     for q_try in queries:
         cmd = [
             "python", "-m", "yt_dlp",
             "--no-playlist",
             "-x", "--audio-format", "opus",
             "--default-search", "ytsearch1",
-            "--extractor-args", "youtube:player_client=visionos,mediaconnect,web",
+            "--extractor-args", "youtube:player_client=android,web_creator,ios,web",
             "-o", temp_raw,
             f"ytsearch1:{q_try}"
         ]
-        if has_cookies:
-            cmd.extend(["--cookies", COOKIES_FILE])
-            
-        logger.info(f"Downloading YouTube track: '{q_try}' (cookies={'yes' if has_cookies else 'no'})...")
+        logger.info(f"Downloading YouTube track: '{q_try}' (clean mode)...")
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=50)
         if res.returncode == 0 and os.path.exists(temp_raw) and os.path.getsize(temp_raw) > 10000:
-            logger.info(f"Successfully downloaded '{q_try}' from YouTube!")
+            logger.info(f"Successfully downloaded '{q_try}' from YouTube in clean mode!")
             return True
         else:
-            logger.warning(f"Attempt failed for '{q_try}': {res.stderr[:200] if res.stderr else 'unknown'}")
+            err_snippet = res.stderr[:250] if res.stderr else "unknown error"
+            logger.warning(f"Clean attempt failed for '{q_try}': {err_snippet}")
+
+    # Pass 2: Fallback with cookies if available and clean mode did not succeed
+    if has_cookies:
+        for q_try in queries:
+            cmd = [
+                "python", "-m", "yt_dlp",
+                "--no-playlist",
+                "-x", "--audio-format", "opus",
+                "--default-search", "ytsearch1",
+                "--extractor-args", "youtube:player_client=android,web_creator,ios,web",
+                "--cookies", COOKIES_FILE,
+                "-o", temp_raw,
+                f"ytsearch1:{q_try}"
+            ]
+            logger.info(f"Downloading YouTube track: '{q_try}' (with cookies)...")
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=50)
+            if res.returncode == 0 and os.path.exists(temp_raw) and os.path.getsize(temp_raw) > 10000:
+                logger.info(f"Successfully downloaded '{q_try}' with cookies!")
+                return True
+            else:
+                if "cookies are no longer valid" in (res.stderr or ""):
+                    logger.warning("Detected expired cookies in environment! Discarding cookies file.")
+                    try:
+                        os.remove(COOKIES_FILE)
+                    except Exception:
+                        pass
+                    break
             
     return False
 
