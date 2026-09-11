@@ -5,7 +5,7 @@ FROM python:3.11-slim
 # - curl: web search & downloading Deno
 # - ca-certificates: SSL validation
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg curl ca-certificates && \
+    apt-get install -y --no-install-recommends ffmpeg curl ca-certificates unzip && \
     rm -rf /var/lib/apt/lists/*
 
 # Install Deno (official JS challenge solver for yt-dlp YouTube extraction)
