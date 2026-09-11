@@ -219,6 +219,7 @@ def download_youtube_audio(query, temp_raw):
     2. Downloads format 251/140 audio directly with proxy/cookies.
     """
     has_cookies = os.path.exists(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 10
+    logger.info(f"Music Engine Status -> Proxy: {'YES' if YOUTUBE_PROXY else 'NO'}, Cookies: {'YES (' + str(os.path.getsize(COOKIES_FILE)) + ' bytes)' if has_cookies else 'NO (cookies.txt missing)'}")
     
     # Target master studio uploads
     queries = [f"{query} official audio", f"{query} audio", query]
