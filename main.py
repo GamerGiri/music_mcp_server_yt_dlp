@@ -30,6 +30,7 @@ PORT = int(os.environ.get("PORT", 10000))
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "").rstrip("/")
 MUSIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "music")
 COOKIES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
+YOUTUBE_PROXY = os.environ.get("YOUTUBE_PROXY", "").strip() or os.environ.get("HTTP_PROXY", "").strip()
 
 try:
     sys.stdout.reconfigure(line_buffering=True)
@@ -40,6 +41,10 @@ except Exception:
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", stream=sys.stdout)
 logger = logging.getLogger("XiaoZhiCloudMCP")
 print(f"=== Starting XiaoZhi Cloud MCP Service (PORT={PORT}) ===", flush=True)
+
+if YOUTUBE_PROXY:
+    masked_proxy = re.sub(r'://([^:]+):([^@]+)@', r'://\1:****@', YOUTUBE_PROXY)
+    logger.info(f"Loaded YouTube proxy: {masked_proxy}")
 
 # Check for YouTube cookies in environment variables
 if os.environ.get("YOUTUBE_COOKIES"):
@@ -176,7 +181,13 @@ def get_youtube_video_url(query):
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept-Language": "en-US,en;q=0.9"
         })
-        with urllib.request.urlopen(req, timeout=6) as r:
+        if YOUTUBE_PROXY:
+            proxy_handler = urllib.request.ProxyHandler({"http": YOUTUBE_PROXY, "https": YOUTUBE_PROXY})
+            opener = urllib.request.build_opener(proxy_handler)
+            resp = opener.open(req, timeout=10)
+        else:
+            resp = urllib.request.urlopen(req, timeout=6)
+        with resp as r:
             html_text = r.read().decode("utf-8", errors="ignore")
         vids = re.findall(r'/watch\?v=([a-zA-Z0-9_-]{11})', html_text)
         if vids:
@@ -187,8 +198,11 @@ def get_youtube_video_url(query):
 
     # 2. Fallback: yt-dlp search without cookies
     try:
-        cmd = ["python", "-m", "yt_dlp", "--default-search", "ytsearch1", "--print", "id", f"ytsearch1:{query}"]
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=12)
+        cmd = ["python", "-m", "yt_dlp", "--default-search", "ytsearch1", "--print", "id"]
+        if YOUTUBE_PROXY:
+            cmd.extend(["--proxy", YOUTUBE_PROXY])
+        cmd.append(f"ytsearch1:{query}")
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
         for line in res.stdout.splitlines():
             vid = line.strip()
             if len(vid) == 11 and re.match(r'^[a-zA-Z0-9_-]{11}$', vid):
@@ -201,8 +215,8 @@ def get_youtube_video_url(query):
 def download_youtube_audio(query, temp_raw):
     """
     Direct YouTube audio download using yt-dlp.
-    1. Resolves video URL cleanly without cookies to avoid HTTP 400 Bad Request on search API.
-    2. Downloads format 251/140 audio directly with cookies to bypass 403 Forbidden.
+    1. Resolves video URL cleanly to avoid HTTP 400 Bad Request on search API.
+    2. Downloads format 251/140 audio directly with proxy/cookies.
     """
     has_cookies = os.path.exists(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 10
     
@@ -225,18 +239,20 @@ def download_youtube_audio(query, temp_raw):
         attempts.append(("with cookies", ["--cookies", COOKIES_FILE]))
     attempts.append(("clean mode", ["--extractor-args", "youtube:player_client=android,web_creator,ios,web"]))
 
+    proxy_args = ["--proxy", YOUTUBE_PROXY] if YOUTUBE_PROXY else []
+
     for mode_name, extra_args in attempts:
         cmd = [
             "python", "-m", "yt_dlp",
             "--no-playlist",
             "-f", "ba/b",
-            "--socket-timeout", "15",
+            "--socket-timeout", "20",
             "-x", "--audio-format", "opus",
             "-o", temp_raw
-        ] + extra_args + [video_url]
+        ] + proxy_args + extra_args + [video_url]
 
-        logger.info(f"Downloading YouTube track ({mode_name}) from {video_url}...")
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        logger.info(f"Downloading YouTube track ({mode_name}{' via proxy' if YOUTUBE_PROXY else ''}) from {video_url}...")
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=75)
         if res.returncode == 0 and os.path.exists(temp_raw) and os.path.getsize(temp_raw) > 10000:
             logger.info(f"Successfully downloaded track from YouTube ({mode_name})!")
             return True
